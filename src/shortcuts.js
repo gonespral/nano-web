@@ -10,11 +10,20 @@
 //             passes to useShortcuts(context, actions)
 //   display — [key, label] shown in the ShortcutBar, or null to keep the
 //             binding active without showing it (matches real nano,
-//             which only surfaces a curated subset in its bottom bar)
+//             which only surfaces a curated subset in its bottom bar).
+//             Within a context, array order also doubles as display
+//             priority — ShortcutBar shows a prefix of this list and
+//             drops the tail when the bar is too narrow or capped, so
+//             list your most important shortcuts first.
 
 export const when = {
-  // Ctrl+<key>, with no Alt/Meta.
-  ctrl: (k) => (e) => e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === k,
+  // Ctrl+<key>, with no Alt/Meta/Shift (Shift is excluded so this can't
+  // shadow a ctrlShift binding on the same letter, e.g. Ctrl+Z vs.
+  // Ctrl+Shift+Z).
+  ctrl: (k) => (e) => e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === k,
+  // Ctrl+Shift+<key>, with no Alt/Meta.
+  ctrlShift: (k) => (e) =>
+    e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === k,
   // Alt+<key> ("M-<key>" in nano's notation), with no Ctrl/Meta.
   alt: (k) => (e) => e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === k,
   // Plain <key>, no modifiers at all (Shift is ignored on purpose for
@@ -46,13 +55,12 @@ export const SHORTCUT_CONTEXTS = {
     { when: when.ctrl("o"), action: "startWriteOut", display: ["^O", "Write Out"] },
     { when: when.ctrl("f"), action: "startSearch", display: ["^F", "Where Is"] },
     { when: when.ctrl("k"), action: "cutLine", display: ["^K", "Cut Text"] },
-    { when: when.ctrl("u"), action: "pasteLine", display: ["^U", "Paste"] },
-    { when: when.ctrl("c"), action: "showPosition", display: ["^C", "Cur Pos"] },
+    { when: when.ctrl("c"), action: "copyText", display: ["^C", "Copy"] },
+    { when: when.ctrl("v"), action: "pasteLine", display: ["^V", "Paste"] },
     { when: when.ctrl("j"), action: "justify", display: ["^J", "Justify"] },
-    { when: when.alt("u"), action: "undo", display: ["Alt+U", "Undo"] },
-    { when: when.alt("e"), action: "redo", display: ["Alt+E", "Redo"] },
+    { when: when.ctrl("z"), action: "undo", display: ["^Z", "Undo"] },
+    { when: when.ctrlShift("z"), action: "redo", display: ["Shift+^Z", "Redo"] },
     { when: when.alt("/"), action: "toggleComment", display: null },
-    { when: when.alt("w"), action: "copyText", display: null },
     { when: when.ctrl("enter"), action: "toggleChecklist", display: null },
     { when: when.plain("enter"), action: "insertNewline", display: null },
     { when: when.plain("tab"), action: "indentOrTab", display: null },

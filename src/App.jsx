@@ -5,7 +5,6 @@ import FileManagerPane from "./components/FileManager.jsx";
 import StatusLine from "./components/StatusLine.jsx";
 import ShortcutBar from "./components/ShortcutBar.jsx";
 import PromptBar from "./components/PromptBar.jsx";
-import ExitedScreen from "./components/ExitedScreen.jsx";
 import {
   cutLine,
   pasteAt,
@@ -21,41 +20,72 @@ import {
 } from "./nanoKeymap.js";
 import { detectLanguage } from "./syntaxHighlight.js";
 import { useShortcuts } from "./useShortcuts.js";
+import { randomBanner } from "./banners.js";
 
 const STORAGE_KEY = "nano-web:buffers";
 const FILES_STORAGE_KEY = "nano-web:files";
 const TAB_SIZE = 4; // nanorc: set tabsize 4
 const UNDO_LIMIT = 200;
 const UNDO_COALESCE_MS = 700; // keystrokes within this window collapse into one undo step
+// Picked once per page load (not per render) so the banner doesn't change
+// while the Help tab is open — only a refresh cycles to a new one.
 const HELP_TEXT = [
-  "nano-web help",
+  randomBanner(),
   "",
-  "^G  Display this help text",
-  "^O  Write the current buffer (trims trailing blanks, clears the modified flag)",
-  "^F  Search for text (wraps around, repeat ^F to find next)",
-  "^R  Jump to the Files tab (arrows/mouse to browse, Enter/click to open,",
-  "    N to create a file, R to rename, D to delete)",
-  "Alt+R  Search and replace (asks for a search term, then a replacement,",
-  "       and replaces every occurrence in the buffer)",
-  "^K  Cut from the cursor to the end of the line",
-  "^U  Paste the last cut/copied text",
-  "^C  Show the current cursor position (also shown live in the bar)",
-  "^J  Justify (reflow) the current paragraph to 80 columns",
-  "Alt+U  Undo the last change",
-  "Alt+E  Redo the last undone change",
-  "Alt+X  Close the current tab (prompts to save if modified)",
-  "Enter  New line, auto-indented to match the line above",
-  "Ctrl+Enter  Toggle the current line as a '- [ ]' checklist item, or check/uncheck it",
-  "Tab  Indent the selected lines (or insert spaces at the cursor)",
-  "Shift+Tab  Cycle to the next tab",
-  "Alt+/  Toggle a // comment on the current line or selection",
-  "Alt+W  Copy the selection (or current line) without cutting it",
+  "# nano-web",
   "",
-  "The Help and Files tabs on the left are always there — they can't be",
-  "closed, just switched away from. Closing a file's tab never deletes it;",
-  "it stays in the Files tab until you delete it from there.",
+  "A `nano`-style text editor that runs entirely in your browser. There's",
+  "no server and no account — every file you create lives in this",
+  "browser's `localStorage`, so it persists across reloads but stays on",
+  "this device. It's a small, keyboard-first editor for jotting notes,",
+  "checklists, and snippets without leaving the tab.",
   "",
-  "Press ^G again to return here from any tab.",
+  "## Getting around",
+  "",
+  "The tab bar on the left has two pinned tabs, **Help** and **Files**,",
+  "followed by one tab per open file. Pinned tabs can't be closed, only",
+  "switched away from. `Shift+Tab` cycles to the next tab.",
+  "",
+  "- **Files** is your file manager: arrows or the mouse to browse,",
+  "  `Enter`/click to open a file in its own tab, `N` to create a new",
+  "  file, `R` to rename the selected one, `D` to delete it.",
+  "- Closing a file's tab (`Alt+X`) never deletes the file — it just",
+  "  removes the tab. The file itself stays in **Files** until you",
+  "  delete it from there.",
+  "",
+  "## Editing",
+  "",
+  "Most shortcuts below mirror GNU `nano`'s terminal keybindings. A few —",
+  "copy, paste, undo, and redo — use the keys every browser and desktop",
+  "app already trains your fingers for instead, since re-mapping those",
+  "specifically would fight muscle memory rather than save it.",
+  "",
+  "- `^O`  Write Out — saves the current buffer (trims trailing blank",
+  "  lines and clears the modified flag)",
+  "- `^F`  Where Is — search for text; wraps around, repeat `^F` to find",
+  "  the next match",
+  "- `Alt+R`  Replace — asks for a search term, then a replacement, and",
+  "  replaces every occurrence in the buffer",
+  "- `^K`  Cut Text — cut from the cursor to the end of the line",
+  "- `^C`  Copy the selection (or current line) without cutting it",
+  "  *(browser-standard, not nano's `^C`)*",
+  "- `^V`  Paste the last cut/copied text *(browser-standard, not",
+  "  nano's `^U`)*",
+  "- `^Z` / `Shift+^Z`  Undo / Redo *(browser-standard, not nano's",
+  "  `Alt+U` / `Alt+E`)*",
+  "- `^J`  Justify — reflow the current paragraph to 80 columns",
+  "- `Tab`  Indent the selected lines, or insert spaces at the cursor",
+  "- `Enter`  New line, auto-indented to match the line above",
+  "- `Ctrl+Enter`  Toggle the current line as a `- [ ]` checklist item,",
+  "  or check/uncheck it if it already is one",
+  "- `Alt+/`  Toggle a `//` comment on the current line or selection",
+  "",
+  "## Tabs and files",
+  "",
+  "- `^R`  Jump to the **Files** tab",
+  "- `^G`  Open this **Help** tab — press it again from anywhere to come",
+  "  back here",
+  "- `Alt+X`  Close the current tab (prompts to save first if modified)",
 ].join("\n");
 
 let nextBufferId = 1;
@@ -83,8 +113,9 @@ function commonPrefixLength(a, b) {
 export default function App() {
   const [buffers, setBuffers] = useState([]);
   // activeId is either a buffer's numeric id, or one of the pinned-tab
-  // sentinels "help" / "files". Land on the Files tab by default.
-  const [activeId, setActiveId] = useState("files");
+  // sentinels "help" / "files". Land on the Help tab (the welcome screen)
+  // by default.
+  const [activeId, setActiveId] = useState("help");
   // `files` is the durable store of saved files (backs the Files tab and
   // localStorage). `buffers` are just the currently open tabs — closing a
   // tab only removes it from `buffers`, never from `files`.
@@ -95,7 +126,6 @@ export default function App() {
     "Welcome to nano-web — press ^G for help"
   );
   const [statusVariant, setStatusVariant] = useState("normal");
-  const [cutBuffer, setCutBuffer] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [replaceTerm, setReplaceTerm] = useState("");
   const [cursorInfo, setCursorInfo] = useState({ line: 1, col: 1 });
@@ -120,7 +150,7 @@ export default function App() {
   }
 
   // nano-style error messages: shown centered, white on red — e.g.
-  // "[ Cutbuffer is empty ]" or "[ Nothing to undo ]".
+  // "[ Nothing to undo ]".
   function setStatusError(message) {
     setStatusText(`[ ${message} ]`);
     setStatusVariant("error");
@@ -466,17 +496,6 @@ export default function App() {
     refocusEditor();
   }
 
-  function restart() {
-    const nb = createBuffer();
-    setBuffers([nb]);
-    setActiveId(nb.id);
-    setCutBuffer("");
-    setSearchTerm("");
-    setStatus("Welcome to nano-web — press ^G for help");
-    setMode("edit");
-    refocusEditor();
-  }
-
   // --- Actions: one function per shortcuts.js `action` name. Keeping
   // these as plain named functions (rather than inlining logic into the
   // bindings) is what makes the keymap in shortcuts.js purely data — swap
@@ -514,28 +533,25 @@ export default function App() {
     }
     recordUndo(activeId, text, { discrete: true });
     updateActiveBuffer(() => ({ text: r.newText, modified: true }));
-    setCutBuffer(r.cut);
+    navigator.clipboard?.writeText(r.cut).catch(() => {});
     setStatus("Cut text");
     setSelection(r.newCursor, r.newCursor);
   }
 
-  function actionPasteLine() {
-    if (!cutBuffer) {
-      setStatusError("Cutbuffer is empty");
-      return;
+  async function actionPasteLine() {
+    let clip = "";
+    try {
+      clip = await navigator.clipboard?.readText();
+    } catch {
+      clip = "";
     }
+    if (!clip) return;
     const { start } = getCursor();
     recordUndo(activeId, text, { discrete: true });
-    const r = pasteAt(text, start, cutBuffer);
+    const r = pasteAt(text, start, clip);
     updateActiveBuffer(() => ({ text: r.newText, modified: true }));
     setStatus("Pasted text");
     setSelection(r.newCursor, r.newCursor);
-  }
-
-  function actionShowPosition() {
-    const { start } = getCursor();
-    const { line, col } = getLineCol(text, start);
-    setStatus(`line ${line}, col ${col}`);
   }
 
   function actionJustify() {
@@ -558,7 +574,7 @@ export default function App() {
 
   function actionCopyText() {
     const { start, end } = getCursor();
-    setCutBuffer(copyLineOrSelection(text, start, end));
+    navigator.clipboard?.writeText(copyLineOrSelection(text, start, end)).catch(() => {});
     setStatus("Copied text");
   }
 
@@ -732,7 +748,6 @@ export default function App() {
     startSearch,
     cutLine: actionCutLine,
     pasteLine: actionPasteLine,
-    showPosition: actionShowPosition,
     justify: actionJustify,
     undo,
     redo,
@@ -760,14 +775,6 @@ export default function App() {
     submitRename,
     cancelPrompt,
   });
-
-  if (buffers.length === 0 && !isHelpTab && !isFilesTab) {
-    return (
-      <div className="nano-app">
-        <ExitedScreen onRestart={restart} />
-      </div>
-    );
-  }
 
   // nanorc: set stateflags (I=autoindent, S=softwrap, M=mark) + minibar
   const flags = "IS" + (hasSelection ? "M" : "");
@@ -810,7 +817,7 @@ export default function App() {
             updateActiveBuffer(() => ({ text: e.target.value, modified: true }));
           }}
           onSelect={syncCursor}
-          language={detectLanguage(filename)}
+          language={isHelpTab ? "markdown" : detectLanguage(filename)}
           readOnly={isReadOnly}
         />
       )}
