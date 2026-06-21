@@ -17,9 +17,10 @@ import {
   toggleChecklist,
   copyLineOrSelection,
   justifyParagraph,
-  matchEditorShortcut,
+  replaceAll,
 } from "./nanoKeymap.js";
 import { detectLanguage } from "./syntaxHighlight.js";
+import { useShortcuts } from "./useShortcuts.js";
 
 const STORAGE_KEY = "nano-web:buffers";
 const FILES_STORAGE_KEY = "nano-web:files";
@@ -32,8 +33,10 @@ const HELP_TEXT = [
   "^G  Display this help text",
   "^O  Write the current buffer (trims trailing blanks, clears the modified flag)",
   "^F  Search for text (wraps around, repeat ^F to find next)",
-  "Alt+R  Jump to the Files tab (arrows/mouse to browse, Enter/click to open,",
-  "       N to create a file, R to rename, D to delete)",
+  "^R  Jump to the Files tab (arrows/mouse to browse, Enter/click to open,",
+  "    N to create a file, R to rename, D to delete)",
+  "Alt+R  Search and replace (asks for a search term, then a replacement,",
+  "       and replaces every occurrence in the buffer)",
   "^K  Cut from the cursor to the end of the line",
   "^U  Paste the last cut/copied text",
   "^C  Show the current cursor position (also shown live in the bar)",
@@ -94,6 +97,7 @@ export default function App() {
   const [statusVariant, setStatusVariant] = useState("normal");
   const [cutBuffer, setCutBuffer] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
+  const [replaceTerm, setReplaceTerm] = useState("");
   const [cursorInfo, setCursorInfo] = useState({ line: 1, col: 1 });
   const [hasSelection, setHasSelection] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
@@ -224,6 +228,14 @@ export default function App() {
       textareaRef.current?.setSelectionRange(start, end);
       syncCursor();
     });
+  }
+
+  // Current cursor/selection bounds, read fresh each time an action needs
+  // them (actions are dispatched by useShortcuts, not by a textarea event,
+  // so there's no `e.target` to read from).
+  function getCursor() {
+    const el = textareaRef.current;
+    return { start: el?.selectionStart ?? 0, end: el?.selectionEnd ?? 0 };
   }
 
   // Records `prevText` (the text *before* the change about to be applied)
@@ -386,51 +398,6 @@ export default function App() {
     refocusEditor();
   }
 
-  // Top-level shortcuts that must work no matter which tab is active or
-  // focused — including the pinned Help/Files tabs, which have no
-  // textarea to attach a keydown handler to. Registered on `window`
-  // (capture phase) rather than a React handler on the app div: once the
-  // textarea unmounts (e.g. switching to the Files tab), focus falls back
-  // to <body>, which is an *ancestor* of the app div, so a capture
-  // listener on that div would never see events targeting body. window is
-  // an ancestor of every possible target, so it always sees the key.
-  useEffect(() => {
-    if (mode !== "edit") return;
-    function onWindowKeyDown(e) {
-      if (e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === "g") {
-        e.preventDefault();
-        e.stopPropagation();
-        openHelpTab();
-        return;
-      }
-      if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === "r") {
-        e.preventDefault();
-        e.stopPropagation();
-        openFileManagerTab();
-        return;
-      }
-      if (e.key === "Tab" && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        e.preventDefault();
-        e.stopPropagation();
-        cycleBuffer(1);
-        return;
-      }
-      if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === "x") {
-        e.preventDefault();
-        e.stopPropagation();
-        if (activeId === "help" || activeId === "files") return; // pinned tabs can't be closed
-        if (modified && !isReadOnly) {
-          setMode("confirm-exit");
-        } else {
-          closeActiveBuffer();
-        }
-      }
-    }
-    window.addEventListener("keydown", onWindowKeyDown, true);
-    return () => window.removeEventListener("keydown", onWindowKeyDown, true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, activeId, modified, isReadOnly]);
-
   // nanorc: set trimblanks — strip trailing whitespace per line on write.
   // "Writing out" commits the buffer to the `files` store (clears the
   // modified flag); it's also persisted to localStorage on every change,
@@ -499,160 +466,6 @@ export default function App() {
     refocusEditor();
   }
 
-  function handleEditorKeyDown(e) {
-    if (mode !== "edit" || isReadOnly) return;
-    const el = textareaRef.current;
-    const selStart = el?.selectionStart ?? 0;
-    const selEnd = el?.selectionEnd ?? 0;
-
-    // bind M-u undo / M-e redo
-    if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === "u") {
-      e.preventDefault();
-      undo();
-      return;
-    }
-    if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === "e") {
-      e.preventDefault();
-      redo();
-      return;
-    }
-
-    // Ctrl+Enter: toggle the current line as a "- [ ]"/"- [x]" checklist item
-    if (e.key === "Enter" && e.ctrlKey && !e.metaKey && !e.altKey) {
-      e.preventDefault();
-      recordUndo(activeId, text, { discrete: true });
-      const r = toggleChecklist(text, selStart);
-      updateActiveBuffer(() => ({ text: r.newText, modified: true }));
-      setSelection(r.newCursor, r.newCursor);
-      return;
-    }
-
-    // nanorc: set autoindent
-    if (e.key === "Enter" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      e.preventDefault();
-      recordUndo(activeId, text, { discrete: true });
-      const indent = leadingWhitespace(text, selStart);
-      const insertion = "\n" + indent;
-      const newText = text.slice(0, selStart) + insertion + text.slice(selEnd);
-      updateActiveBuffer(() => ({ text: newText, modified: true }));
-      setSelection(selStart + insertion.length, selStart + insertion.length);
-      return;
-    }
-
-    // nanorc: set tabstospaces (+ indent/unindent selected lines)
-    if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      e.preventDefault();
-      recordUndo(activeId, text, { discrete: true });
-      if (selStart !== selEnd) {
-        const r = indentLines(text, selStart, selEnd, TAB_SIZE);
-        updateActiveBuffer(() => ({ text: r.newText, modified: true }));
-        setSelection(r.newStart, r.newEnd);
-      } else {
-        const spaces = " ".repeat(TAB_SIZE);
-        const newText = text.slice(0, selStart) + spaces + text.slice(selEnd);
-        updateActiveBuffer(() => ({ text: newText, modified: true }));
-        setSelection(selStart + spaces.length, selStart + spaces.length);
-      }
-      return;
-    }
-
-    // bind M-/ comment main
-    if (e.altKey && e.key === "/") {
-      e.preventDefault();
-      recordUndo(activeId, text, { discrete: true });
-      const r = toggleLineComment(text, selStart, selEnd);
-      updateActiveBuffer(() => ({ text: r.newText, modified: true }));
-      setSelection(r.newStart, r.newEnd);
-      setStatus("Toggled comment");
-      return;
-    }
-
-    // bind M-w copy all
-    if (e.altKey && e.key.toLowerCase() === "w") {
-      e.preventDefault();
-      setCutBuffer(copyLineOrSelection(text, selStart, selEnd));
-      setStatus("Copied text");
-      return;
-    }
-
-    const action = matchEditorShortcut(e);
-    if (!action) return;
-    e.preventDefault();
-
-    switch (action) {
-      case "writeOut":
-        setPromptValue(filename);
-        setMode("prompt-save");
-        break;
-      case "search":
-        setPromptValue(searchTerm);
-        setMode("prompt-search");
-        break;
-      case "cutLine": {
-        const r = cutLine(text, selStart);
-        if (!r.cut) {
-          setStatusError("Nothing to cut");
-          break;
-        }
-        recordUndo(activeId, text, { discrete: true });
-        updateActiveBuffer(() => ({ text: r.newText, modified: true }));
-        setCutBuffer(r.cut);
-        setStatus("Cut text");
-        setSelection(r.newCursor, r.newCursor);
-        break;
-      }
-      case "pasteLine": {
-        if (!cutBuffer) {
-          setStatusError("Cutbuffer is empty");
-          break;
-        }
-        recordUndo(activeId, text, { discrete: true });
-        const r = pasteAt(text, selStart, cutBuffer);
-        updateActiveBuffer(() => ({ text: r.newText, modified: true }));
-        setStatus("Pasted text");
-        setSelection(r.newCursor, r.newCursor);
-        break;
-      }
-      case "showPosition": {
-        const { line, col } = getLineCol(text, selStart);
-        setStatus(`line ${line}, col ${col}`);
-        break;
-      }
-      case "justify": {
-        recordUndo(activeId, text, { discrete: true });
-        const r = justifyParagraph(text, selStart);
-        updateActiveBuffer(() => ({ text: r.newText, modified: true }));
-        setSelection(r.newCursor, r.newCursor);
-        setStatus("Justified paragraph");
-        break;
-      }
-      default:
-        break;
-    }
-  }
-
-  function handlePromptKeyDown(e) {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      let success = true;
-      if (mode === "prompt-save") success = writeOut(promptValue);
-      else if (mode === "prompt-search") doSearch(promptValue);
-      else if (mode === "prompt-new-file") success = createNewFileFromPrompt(promptValue);
-      else if (mode === "prompt-rename-file") success = renameFileFromPrompt(promptValue);
-      // A duplicate filename leaves the prompt open so the user can retype.
-      if (success !== false) {
-        setMode("edit");
-        refocusEditor();
-      }
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      setStatus("Cancelled");
-      setFmRenameTarget(null);
-      setMode("edit");
-      refocusEditor();
-    }
-  }
-
   function restart() {
     const nb = createBuffer();
     setBuffers([nb]);
@@ -664,90 +477,228 @@ export default function App() {
     refocusEditor();
   }
 
-  // confirm-exit captures keys at the window level rather than on the
-  // (possibly unfocused) textarea.
-  useEffect(() => {
-    if (mode !== "confirm-exit") return;
-    function onWindowKeyDown(e) {
-      const key = e.key.toLowerCase();
-      if (key === "y") {
-        e.preventDefault();
-        if (writeOut(filename)) {
-          closeActiveBuffer();
-          setMode("edit");
-        } else {
-          // Name clash with another saved file — fall back to the save
-          // prompt so the user can pick a different name instead of
-          // silently losing the buffer.
-          setPromptValue(filename);
-          setMode("prompt-save");
-        }
-      } else if (key === "n") {
-        e.preventDefault();
-        closeActiveBuffer();
-        setMode("edit");
-      } else if (e.key === "Escape" || (e.ctrlKey && key === "c")) {
-        e.preventDefault();
-        setStatus("Cancelled");
-        setMode("edit");
-        refocusEditor();
-      }
-    }
-    window.addEventListener("keydown", onWindowKeyDown);
-    return () => window.removeEventListener("keydown", onWindowKeyDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, filename, text, activeId]);
+  // --- Actions: one function per shortcuts.js `action` name. Keeping
+  // these as plain named functions (rather than inlining logic into the
+  // bindings) is what makes the keymap in shortcuts.js purely data — swap
+  // a key or a context's action list there without touching any of this.
 
-  // Files tab: arrow keys / mouse move the highlight, Enter or a click
-  // opens, N/R/D create, rename, delete. Captured at the window level
-  // since the pane has no single focused element (it's plain text, not a
-  // textarea).
-  useEffect(() => {
-    if (mode !== "edit" || !isFilesTab) return;
-    function onWindowKeyDown(e) {
-      if (fmConfirmDelete) {
-        const key = e.key.toLowerCase();
-        if (key === "y") {
-          e.preventDefault();
-          deleteFile(fmConfirmDelete);
-        } else if (key === "n" || e.key === "Escape") {
-          e.preventDefault();
-          setFmConfirmDelete(null);
-        }
-        return;
-      }
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setFmIndex((i) => Math.min(i + 1, Math.max(files.length - 1, 0)));
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setFmIndex((i) => Math.max(i - 1, 0));
-        return;
-      }
-      if (e.key === "Enter") {
-        e.preventDefault();
-        openFileFromManager(files[fmIndex]);
-        return;
-      }
-      if (e.ctrlKey || e.altKey || e.metaKey) return;
-      const key = e.key.toLowerCase();
-      if (key === "n") {
-        e.preventDefault();
-        requestNewFile();
-      } else if (key === "r") {
-        e.preventDefault();
-        requestRenameFile(files[fmIndex]);
-      } else if (key === "d") {
-        e.preventDefault();
-        requestDeleteFile(files[fmIndex]);
-      }
+  function startWriteOut() {
+    setPromptValue(filename);
+    setMode("prompt-save");
+  }
+
+  function startSearch() {
+    setPromptValue(searchTerm);
+    setMode("prompt-search");
+  }
+
+  function startReplace() {
+    setPromptValue(searchTerm);
+    setMode("prompt-replace-search");
+  }
+
+  function closeTab() {
+    if (modified && !isReadOnly) {
+      setMode("confirm-exit");
+    } else {
+      closeActiveBuffer();
     }
-    window.addEventListener("keydown", onWindowKeyDown);
-    return () => window.removeEventListener("keydown", onWindowKeyDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, isFilesTab, files, fmIndex, fmConfirmDelete]);
+  }
+
+  function actionCutLine() {
+    const { start } = getCursor();
+    const r = cutLine(text, start);
+    if (!r.cut) {
+      setStatusError("Nothing to cut");
+      return;
+    }
+    recordUndo(activeId, text, { discrete: true });
+    updateActiveBuffer(() => ({ text: r.newText, modified: true }));
+    setCutBuffer(r.cut);
+    setStatus("Cut text");
+    setSelection(r.newCursor, r.newCursor);
+  }
+
+  function actionPasteLine() {
+    if (!cutBuffer) {
+      setStatusError("Cutbuffer is empty");
+      return;
+    }
+    const { start } = getCursor();
+    recordUndo(activeId, text, { discrete: true });
+    const r = pasteAt(text, start, cutBuffer);
+    updateActiveBuffer(() => ({ text: r.newText, modified: true }));
+    setStatus("Pasted text");
+    setSelection(r.newCursor, r.newCursor);
+  }
+
+  function actionShowPosition() {
+    const { start } = getCursor();
+    const { line, col } = getLineCol(text, start);
+    setStatus(`line ${line}, col ${col}`);
+  }
+
+  function actionJustify() {
+    const { start } = getCursor();
+    recordUndo(activeId, text, { discrete: true });
+    const r = justifyParagraph(text, start);
+    updateActiveBuffer(() => ({ text: r.newText, modified: true }));
+    setSelection(r.newCursor, r.newCursor);
+    setStatus("Justified paragraph");
+  }
+
+  function actionToggleComment() {
+    const { start, end } = getCursor();
+    recordUndo(activeId, text, { discrete: true });
+    const r = toggleLineComment(text, start, end);
+    updateActiveBuffer(() => ({ text: r.newText, modified: true }));
+    setSelection(r.newStart, r.newEnd);
+    setStatus("Toggled comment");
+  }
+
+  function actionCopyText() {
+    const { start, end } = getCursor();
+    setCutBuffer(copyLineOrSelection(text, start, end));
+    setStatus("Copied text");
+  }
+
+  function actionToggleChecklist() {
+    const { start } = getCursor();
+    recordUndo(activeId, text, { discrete: true });
+    const r = toggleChecklist(text, start);
+    updateActiveBuffer(() => ({ text: r.newText, modified: true }));
+    setSelection(r.newCursor, r.newCursor);
+  }
+
+  function actionInsertNewline() {
+    const { start, end } = getCursor();
+    recordUndo(activeId, text, { discrete: true });
+    const indent = leadingWhitespace(text, start);
+    const insertion = "\n" + indent;
+    const newText = text.slice(0, start) + insertion + text.slice(end);
+    updateActiveBuffer(() => ({ text: newText, modified: true }));
+    setSelection(start + insertion.length, start + insertion.length);
+  }
+
+  function actionIndentOrTab() {
+    const { start, end } = getCursor();
+    recordUndo(activeId, text, { discrete: true });
+    if (start !== end) {
+      const r = indentLines(text, start, end, TAB_SIZE);
+      updateActiveBuffer(() => ({ text: r.newText, modified: true }));
+      setSelection(r.newStart, r.newEnd);
+    } else {
+      const spaces = " ".repeat(TAB_SIZE);
+      const newText = text.slice(0, start) + spaces + text.slice(end);
+      updateActiveBuffer(() => ({ text: newText, modified: true }));
+      setSelection(start + spaces.length, start + spaces.length);
+    }
+  }
+
+  function filesMoveUp() {
+    setFmIndex((i) => Math.max(i - 1, 0));
+  }
+
+  function filesMoveDown() {
+    setFmIndex((i) => Math.min(i + 1, Math.max(files.length - 1, 0)));
+  }
+
+  function filesOpenSelected() {
+    openFileFromManager(files[fmIndex]);
+  }
+
+  function confirmDeleteYes() {
+    deleteFile(fmConfirmDelete);
+  }
+
+  function confirmDeleteNo() {
+    setFmConfirmDelete(null);
+  }
+
+  function confirmExitYes() {
+    if (writeOut(filename)) {
+      closeActiveBuffer();
+      setMode("edit");
+    } else {
+      // Name clash with another saved file — fall back to the save prompt
+      // so the user can pick a different name instead of silently losing
+      // the buffer.
+      setPromptValue(filename);
+      setMode("prompt-save");
+    }
+  }
+
+  function confirmExitNo() {
+    closeActiveBuffer();
+    setMode("edit");
+  }
+
+  function confirmExitCancel() {
+    setStatus("Cancelled");
+    setMode("edit");
+    refocusEditor();
+  }
+
+  function submitSave() {
+    if (writeOut(promptValue)) {
+      setMode("edit");
+      refocusEditor();
+    }
+    // On a name clash writeOut already set the error; stay in the prompt.
+  }
+
+  function submitSearch() {
+    doSearch(promptValue);
+    setMode("edit");
+    refocusEditor();
+  }
+
+  function submitReplaceSearch() {
+    if (!promptValue) {
+      setStatusError("No search string");
+      setMode("edit");
+      refocusEditor();
+      return;
+    }
+    setReplaceTerm(promptValue);
+    setSearchTerm(promptValue);
+    setPromptValue("");
+    setMode("prompt-replace-with");
+  }
+
+  function submitReplaceWith() {
+    const r = replaceAll(text, replaceTerm, promptValue);
+    if (r.count === 0) {
+      setStatusError(`"${replaceTerm}" not found`);
+    } else {
+      recordUndo(activeId, text, { discrete: true });
+      updateActiveBuffer(() => ({ text: r.newText, modified: true }));
+      setStatus(`Replaced ${r.count} occurrence${r.count === 1 ? "" : "s"}`);
+    }
+    setMode("edit");
+    refocusEditor();
+  }
+
+  function submitNewFile() {
+    if (createNewFileFromPrompt(promptValue)) {
+      setMode("edit");
+      refocusEditor();
+    }
+  }
+
+  function submitRename() {
+    if (renameFileFromPrompt(promptValue)) {
+      setMode("edit");
+      refocusEditor();
+    }
+  }
+
+  function cancelPrompt() {
+    setStatus("Cancelled");
+    setFmRenameTarget(null);
+    setMode("edit");
+    refocusEditor();
+  }
 
   // nanorc: set minibar — messages show briefly, then revert to the
   // filename/flags/position line.
@@ -756,6 +707,59 @@ export default function App() {
     const t = setTimeout(() => setStatus(null), 2500);
     return () => clearTimeout(t);
   }, [status]);
+
+  // Which binding table (shortcuts.js) is live right now — also doubles
+  // as the ShortcutBar's legend selector, so behavior and the on-screen
+  // hints can never disagree about what context we're in.
+  const shortcutContext =
+    mode !== "edit"
+      ? mode
+      : isHelpTab
+      ? "help"
+      : isFilesTab
+      ? fmConfirmDelete
+        ? "confirm-delete-file"
+        : "files"
+      : "file";
+
+  useShortcuts(shortcutContext, {
+    openHelp: openHelpTab,
+    openFiles: openFileManagerTab,
+    startReplace,
+    cycleNext: () => cycleBuffer(1),
+    closeTab,
+    startWriteOut,
+    startSearch,
+    cutLine: actionCutLine,
+    pasteLine: actionPasteLine,
+    showPosition: actionShowPosition,
+    justify: actionJustify,
+    undo,
+    redo,
+    toggleComment: actionToggleComment,
+    copyText: actionCopyText,
+    toggleChecklist: actionToggleChecklist,
+    insertNewline: actionInsertNewline,
+    indentOrTab: actionIndentOrTab,
+    filesMoveUp,
+    filesMoveDown,
+    filesOpenSelected,
+    filesNewFile: requestNewFile,
+    filesRenameSelected: () => requestRenameFile(files[fmIndex]),
+    filesDeleteSelected: () => requestDeleteFile(files[fmIndex]),
+    confirmDeleteYes,
+    confirmDeleteNo,
+    confirmExitYes,
+    confirmExitNo,
+    confirmExitCancel,
+    submitSave,
+    submitSearch,
+    submitReplaceSearch,
+    submitReplaceWith,
+    submitNewFile,
+    submitRename,
+    cancelPrompt,
+  });
 
   if (buffers.length === 0 && !isHelpTab && !isFilesTab) {
     return (
@@ -774,16 +778,6 @@ export default function App() {
     ? `Files   ${files.length} saved file${files.length === 1 ? "" : "s"}`
     : `${filename || "New Buffer"}${modified ? " *" : ""}   [${flags}]   line ${cursorInfo.line}, col ${cursorInfo.col}   ${percent}%`;
   const fmSelectedIndex = Math.min(fmIndex, Math.max(files.length - 1, 0));
-  const shortcutKind =
-    mode === "edit"
-      ? isHelpTab
-        ? "help"
-        : isFilesTab
-        ? fmConfirmDelete
-          ? "confirm-delete-file"
-          : "files"
-        : "file"
-      : mode;
 
   return (
     <div className="nano-app">
@@ -815,7 +809,6 @@ export default function App() {
             recordUndo(activeId, text, { discrete: false });
             updateActiveBuffer(() => ({ text: e.target.value, modified: true }));
           }}
-          onKeyDown={handleEditorKeyDown}
           onSelect={syncCursor}
           language={detectLanguage(filename)}
           readOnly={isReadOnly}
@@ -835,7 +828,6 @@ export default function App() {
           label="File Name to Write:"
           value={promptValue}
           onChange={(e) => setPromptValue(e.target.value)}
-          onKeyDown={handlePromptKeyDown}
         />
       )}
       {mode === "prompt-search" && (
@@ -844,7 +836,22 @@ export default function App() {
           label="Search:"
           value={promptValue}
           onChange={(e) => setPromptValue(e.target.value)}
-          onKeyDown={handlePromptKeyDown}
+        />
+      )}
+      {mode === "prompt-replace-search" && (
+        <PromptBar
+          ref={promptInputRef}
+          label="Search (to replace):"
+          value={promptValue}
+          onChange={(e) => setPromptValue(e.target.value)}
+        />
+      )}
+      {mode === "prompt-replace-with" && (
+        <PromptBar
+          ref={promptInputRef}
+          label="Replace With:"
+          value={promptValue}
+          onChange={(e) => setPromptValue(e.target.value)}
         />
       )}
       {mode === "prompt-new-file" && (
@@ -853,7 +860,6 @@ export default function App() {
           label="New File Name:"
           value={promptValue}
           onChange={(e) => setPromptValue(e.target.value)}
-          onKeyDown={handlePromptKeyDown}
         />
       )}
       {mode === "prompt-rename-file" && (
@@ -862,10 +868,9 @@ export default function App() {
           label="Rename To:"
           value={promptValue}
           onChange={(e) => setPromptValue(e.target.value)}
-          onKeyDown={handlePromptKeyDown}
         />
       )}
-      <ShortcutBar kind={shortcutKind} />
+      <ShortcutBar kind={shortcutContext} />
     </div>
   );
 }

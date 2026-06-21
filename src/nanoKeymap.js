@@ -220,25 +220,10 @@ export function justifyParagraph(text, cursor, fillWidth = FILL_WIDTH) {
   return { newText, newCursor: startOffset + newParagraph.length };
 }
 
-// Maps a keydown event on the editor textarea to a nano action name, or
-// null if the key combo isn't one nano-web handles (let it fall through
-// to default textarea behavior).
-export function matchEditorShortcut(e) {
-  if (!e.ctrlKey || e.metaKey || e.altKey) return null;
-  switch (e.key.toLowerCase()) {
-    case "o":
-      return "writeOut";
-    case "f":
-      return "search";
-    case "k":
-      return "cutLine";
-    case "u":
-      return "pasteLine";
-    case "c":
-      return "showPosition";
-    case "j":
-      return "justify";
-    default:
-      return null;
-  }
+// Replaces every occurrence of `term` with `replacement`. Plain substring
+// matching, same semantics as findNext's search.
+export function replaceAll(text, term, replacement) {
+  if (!term) return { newText: text, count: 0 };
+  const parts = text.split(term);
+  return { newText: parts.join(replacement), count: parts.length - 1 };
 }
